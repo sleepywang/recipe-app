@@ -1,8 +1,15 @@
 import os
 import logging
-from flask import Flask, request, jsonify, send_from_directory
+import openai
+from pathlib import Path
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify, send_from_directory, current_app
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+
+# Explicitly load .env file from the same directory as app.py
+dotenv_path = Path(__file__).resolve().parent / '.env'
+load_dotenv(dotenv_path=dotenv_path)
 
 # Configuration
 DEBUG = True
@@ -64,7 +71,10 @@ def handle_tags(tags_string):
     if not tags_string:
         return []
     
-    tag_names = [name.strip() for name in tags_string.split(',') if name.strip()]
+    # Replace Chinese comma with English comma, then split
+    processed_string = tags_string.replace('，', ',')
+    tag_names = [name.strip() for name in processed_string.split(',') if name.strip()]
+    
     tags = []
     for name in tag_names:
         tag = Tag.query.filter_by(name=name).first()
@@ -72,7 +82,6 @@ def handle_tags(tags_string):
             tag = Tag(name=name)
             db.session.add(tag)
         tags.append(tag)
-    # The session is committed by the calling function (create_recipe or update_recipe)
     return tags
 
 # --- API Routes ---
@@ -80,42 +89,30 @@ def handle_tags(tags_string):
 @app.route('/api/recipes', methods=['GET'])
 def get_recipes():
     recipes = Recipe.query.all()
-    app.logger.info(f"Found {len(recipes)} recipes.")
-    app.logger.info(f"Recipes: {recipes}")
     return jsonify([recipe.to_dict() for recipe in recipes])
 
 @app.route('/api/recipes', methods=['POST'])
 def create_recipe():
-    app.logger.info("--- CREATE RECIPE ENDPOINT HIT ---")
-    app.logger.info(f"Request raw data: {request.data}")
     try:
         data = request.get_json()
         if not data:
-            app.logger.warning("Request JSON data is empty or invalid.")
             return jsonify({"error": "Invalid JSON"}), 400
-
-        app.logger.info(f"JSON data parsed: {data}")
 
         new_recipe = Recipe(
             title=data['title'],
             description=data['description'],
             image_url=data.get('image_url')
         )
-        app.logger.info("Recipe object created.")
 
         new_recipe.tags = handle_tags(data.get('tags'))
-        app.logger.info("Tags handled.")
 
         db.session.add(new_recipe)
-        app.logger.info("Recipe added to session.")
-
         db.session.commit()
-        app.logger.info("Session committed successfully.")
 
         return jsonify(new_recipe.to_dict()), 201
     except Exception as e:
-        app.logger.error(f"Error creating recipe: {e}", exc_info=True)
-        db.session.rollback() # Rollback the session in case of error
+        current_app.logger.error(f"Error creating recipe: {e}", exc_info=True)
+        db.session.rollback()
         return jsonify({'error': 'Internal Server Error'}), 500
 
 @app.route('/api/recipes/<int:id>', methods=['GET'])
@@ -127,8 +124,6 @@ def get_recipe(id):
 
 @app.route('/api/recipes/<int:id>', methods=['PUT'])
 def update_recipe(id):
-    app.logger.info(f"--- UPDATE RECIPE ENDPOINT HIT FOR ID: {id} ---")
-    app.logger.info(f"Request raw data: {request.data}")
     try:
         recipe = db.session.get(Recipe, id)
         if recipe is None:
@@ -136,23 +131,18 @@ def update_recipe(id):
         
         data = request.get_json()
         if not data:
-            app.logger.warning("Request JSON data is empty or invalid.")
             return jsonify({"error": "Invalid JSON"}), 400
-
-        app.logger.info(f"JSON data parsed: {data}")
 
         recipe.title = data.get('title', recipe.title)
         recipe.description = data.get('description', recipe.description)
         recipe.image_url = data.get('image_url', recipe.image_url)
         if 'tags' in data:
-            app.logger.info("Handling tags for update...")
             recipe.tags = handle_tags(data.get('tags'))
         
         db.session.commit()
-        app.logger.info(f"Recipe {id} updated and session committed.")
         return jsonify(recipe.to_dict())
     except Exception as e:
-        app.logger.error(f"Error updating recipe {id}: {e}", exc_info=True)
+        current_app.logger.error(f"Error updating recipe {id}: {e}", exc_info=True)
         db.session.rollback()
         return jsonify({'error': 'Internal Server Error'}), 500
 
@@ -162,13 +152,11 @@ def delete_recipe(id):
     if recipe is None:
         return jsonify({'error': 'Recipe not found'}), 404
 
-    # Get tags before deleting recipe
     tags_to_check = list(recipe.tags)
 
     db.session.delete(recipe)
     db.session.commit()
 
-    # Check for orphaned tags
     if tags_to_check:
         for tag in tags_to_check:
             if not tag.recipes:
@@ -176,6 +164,42 @@ def delete_recipe(id):
         db.session.commit()
 
     return jsonify({'message': 'Recipe deleted successfully'}), 200
+
+@app.route('/api/ai-suggest', methods=['GET'])
+def ai_suggest():
+    title = request.args.get('title')
+    if not title:
+        return jsonify({'error': 'Title parameter is required'}), 400
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        current_app.logger.error("OPENAI_API_KEY is not set in the environment.")
+        return jsonify({'error': 'AI service is not configured on the server.'}), 500
+
+    try:
+        openai.api_key = api_key
+        
+        prompt = f"请为 '{title}' 这道菜生成一份详细的烹饪步骤。请直接以编号列表的形式给出步骤 (例如：1. ..., 2. ...)，语言清晰简洁，不要包含食材列表或任何额外的前言或结语。"
+
+        chat_completion = openai.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model="gpt-3.5-turbo",
+        )
+        
+        ai_description = chat_completion.choices[0].message.content
+
+        return jsonify({
+            'description': ai_description
+        })
+
+    except Exception as e:
+        current_app.logger.error(f"AI suggestion failed: {e}")
+        return jsonify({'error': 'An error occurred while getting AI suggestions.'}), 500
 
 @app.route('/api/tags', methods=['GET'])
 def get_tags():

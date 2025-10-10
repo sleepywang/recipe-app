@@ -35,5 +35,8 @@ export default {
         'Content-Type': 'multipart/form-data'
       }
     });
+  },
+  getAiSuggestions(title) {
+    return apiClient.get(`/ai-suggest?title=${encodeURIComponent(title)}`);
   }
 };

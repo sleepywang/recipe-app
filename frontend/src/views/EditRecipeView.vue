@@ -86,8 +86,4 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.edit-recipe {
-  max-width: 600px;
-  margin: auto;
-}
 </style>
